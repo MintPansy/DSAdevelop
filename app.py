@@ -7,12 +7,14 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import sys
+from datetime import datetime, timedelta
 
 # 프로젝트 루트를 경로에 추가
 sys.path.append(str(Path(__file__).parent))
 
 from data.sample_data import generate_all_sample_data
 from models.predictor import ChurnPredictor
+import os
 from utils.visualization import (
     create_risk_score_gauge,
     create_churn_distribution_chart,
@@ -93,21 +95,66 @@ st.markdown("""
 
 @st.cache_data
 def load_sample_data():
-    """샘플 데이터 로드 (캐싱)"""
+    """
+    샘플 데이터 로드 (캐싱)
+    CSV 파일이 있으면 CSV에서 로드, 없으면 더미데이터 생성
+    """
+    data_path = Path("data")
+    
+    # CSV 파일 존재 여부 확인
+    transactions_csv = data_path / "transactions.csv"
+    customers_csv = data_path / "customers.csv"
+    predictions_csv = data_path / "predictions.csv"
+    
+    if transactions_csv.exists() and customers_csv.exists() and predictions_csv.exists():
+        # CSV 파일에서 로드
+        try:
+            transactions_df = pd.read_csv(transactions_csv, encoding='utf-8-sig')
+            customers_df = pd.read_csv(customers_csv, encoding='utf-8-sig')
+            predictions_df = pd.read_csv(predictions_csv, encoding='utf-8-sig')
+            
+            # 날짜 컬럼 변환
+            transactions_df['transaction_date'] = pd.to_datetime(transactions_df['transaction_date'])
+            transactions_df['cancellation_date'] = pd.to_datetime(
+                transactions_df['cancellation_date'], errors='coerce'
+            )
+            customers_df['registration_date'] = pd.to_datetime(customers_df['registration_date'])
+            
+            # seller_df는 더미데이터 (거래 데이터에서 추출)
+            seller_df = pd.DataFrame({
+                'seller_id': transactions_df['customer_id'].unique()[:200] if len(transactions_df) > 0 else []
+            })
+            
+            return customers_df, seller_df, transactions_df, predictions_df
+        except Exception as e:
+            st.warning(f"CSV 파일 로드 중 오류 발생: {e}. 더미데이터를 생성합니다.")
+    
+    # CSV 파일이 없으면 기존 방식으로 생성
     customer_df, seller_df, transaction_df = generate_all_sample_data(
         n_customers=1000,
         n_sellers=200,
         n_transactions=5000
     )
-    return customer_df, seller_df, transaction_df
+    
+    # predictions_df 생성 (기존 방식)
+    predictions_df = pd.DataFrame({
+        'customer_id': customer_df['customer_id'],
+        'churn_probability': customer_df.get('churn_probability', np.random.random(len(customer_df))),
+        'risk_level': pd.cut(
+            customer_df.get('churn_probability', np.random.random(len(customer_df))),
+            bins=[0, 0.3, 0.7, 1.0],
+            labels=['낮음', '중간', '높음']
+        )
+    })
+    
+    return customer_df, seller_df, transaction_df, predictions_df
 
 
-def calculate_recent_churn_rate(customer_df, transaction_df, days=7):
+def calculate_recent_churn_rate(transaction_df, days=7):
     """
-    최근 N일 평균 해지율 계산
+    최근 N일 평균 해지율 계산 (거래 취소율)
     
     Args:
-        customer_df: 고객 데이터프레임
         transaction_df: 거래 데이터프레임
         days: 최근 며칠간 (기본 7일)
     
@@ -116,24 +163,26 @@ def calculate_recent_churn_rate(customer_df, transaction_df, days=7):
     """
     from datetime import datetime, timedelta
     
-    # 최근 N일 이내 거래 고객 필터링
+    # 최근 N일 이내 거래 필터링
     # 입력 데이터프레임을 수정하지 않도록 복사본 생성
     transaction_df_copy = transaction_df.copy()
     cutoff_date = datetime.now() - timedelta(days=days)
-    transaction_df_copy['transaction_date'] = pd.to_datetime(transaction_df_copy['transaction_date'])
-    recent_customers = transaction_df_copy[
+    
+    # transaction_date가 이미 datetime이 아닐 수 있으므로 변환
+    if not pd.api.types.is_datetime64_any_dtype(transaction_df_copy['transaction_date']):
+        transaction_df_copy['transaction_date'] = pd.to_datetime(transaction_df_copy['transaction_date'])
+    
+    recent_transactions = transaction_df_copy[
         transaction_df_copy['transaction_date'] >= cutoff_date
-    ]['customer_id'].unique()
+    ]
     
-    # 최근 거래 고객 중 해지 고객 비율
-    if len(recent_customers) > 0:
-        recent_customer_df = customer_df[customer_df['customer_id'].isin(recent_customers)]
-        if len(recent_customer_df) > 0 and 'churn' in recent_customer_df.columns:
-            return recent_customer_df['churn'].mean() * 100
+    # 최근 거래 중 취소율 계산
+    if len(recent_transactions) > 0 and 'transaction_canceled' in recent_transactions.columns:
+        return recent_transactions['transaction_canceled'].mean() * 100
     
-    # 대체: 전체 해지율의 80% (최근 데이터가 적을 경우)
-    if 'churn' in customer_df.columns:
-        return customer_df['churn'].mean() * 100 * 0.8
+    # 대체: 전체 거래 취소율
+    if 'transaction_canceled' in transaction_df_copy.columns:
+        return transaction_df_copy['transaction_canceled'].mean() * 100
     
     return 0.0
 
@@ -156,8 +205,16 @@ def main():
     
     # 데이터 로드
     with st.spinner("데이터 로딩 중..."):
-        customer_df, seller_df, transaction_df = load_sample_data()
+        customer_df, seller_df, transaction_df, predictions_df = load_sample_data()
         predictor = load_predictor()
+    
+    # 예측 데이터와 고객 데이터 병합
+    if 'customer_id' in predictions_df.columns:
+        customer_df = customer_df.merge(predictions_df, on='customer_id', how='left')
+        # risk_score는 churn_probability * 100으로 계산
+        if 'churn_probability' in customer_df.columns:
+            customer_df['risk_score'] = (customer_df['churn_probability'] * 100).round(2)
+            customer_df['predicted_churn'] = (customer_df['churn_probability'] > 0.5).astype(int)
     
     # 사이드바
     with st.sidebar:
@@ -167,15 +224,20 @@ def main():
         st.subheader("📊 필터")
         selected_regions = st.multiselect(
             "지역 선택",
-            options=customer_df['region'].unique(),
-            default=customer_df['region'].unique()
+            options=sorted(customer_df['region'].unique()) if 'region' in customer_df.columns else [],
+            default=sorted(customer_df['region'].unique()) if 'region' in customer_df.columns else []
         )
         
-        selected_subscription = st.multiselect(
-            "구독 유형",
-            options=customer_df['subscription_type'].unique(),
-            default=customer_df['subscription_type'].unique()
-        )
+        # customer_segment 또는 subscription_type
+        segment_col = 'customer_segment' if 'customer_segment' in customer_df.columns else 'subscription_type'
+        if segment_col in customer_df.columns:
+            selected_segments = st.multiselect(
+                "고객 세그먼트" if segment_col == 'customer_segment' else "구독 유형",
+                options=sorted(customer_df[segment_col].unique()),
+                default=sorted(customer_df[segment_col].unique())
+            )
+        else:
+            selected_segments = []
         
         risk_threshold = st.slider(
             "리스크 스코어 임계값",
@@ -189,20 +251,19 @@ def main():
         st.markdown("**💡 팁**: 필터를 조정하여 특정 고객 그룹을 분석할 수 있습니다.")
     
     # 필터 적용
-    filtered_df = customer_df[
-        (customer_df['region'].isin(selected_regions)) &
-        (customer_df['subscription_type'].isin(selected_subscription))
-    ].copy()
+    filter_conditions = []
+    if selected_regions and 'region' in customer_df.columns:
+        filter_conditions.append(customer_df['region'].isin(selected_regions))
+    if selected_segments and segment_col in customer_df.columns:
+        filter_conditions.append(customer_df[segment_col].isin(selected_segments))
     
-    # 예측 수행
-    if len(filtered_df) > 0:
-        predictions = predictor.predict(filtered_df)
-        filtered_df['risk_score'] = predictions['risk_score']
-        filtered_df['churn_probability'] = predictions['churn_probability']
-        filtered_df['predicted_churn'] = predictions['churn']
+    if filter_conditions:
+        filtered_df = customer_df[np.logical_and.reduce(filter_conditions)].copy()
+    else:
+        filtered_df = customer_df.copy()
     
     # 상단 메트릭 요약
-    show_metrics_summary(filtered_df, customer_df, transaction_df)
+    show_metrics_summary(filtered_df, transaction_df)
     
     # 탭 네비게이션
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -213,7 +274,7 @@ def main():
     ])
     
     with tab1:
-        show_customer_detail(filtered_df, predictor)
+        show_customer_detail(filtered_df, transaction_df, predictor)
     
     with tab2:
         show_segment_analysis(filtered_df, predictor)
@@ -222,17 +283,17 @@ def main():
         show_ab_test(filtered_df, predictor)
     
     with tab4:
-        show_batch_analysis(filtered_df, customer_df, seller_df, transaction_df, predictor)
+        show_batch_analysis(filtered_df, customer_df, transaction_df, predictor)
 
 
-def show_metrics_summary(df, customer_df, transaction_df):
+def show_metrics_summary(df, transaction_df):
     """상단 메트릭 요약 섹션"""
     st.markdown("### 📊 주요 지표")
     
     # 메트릭 계산
     avg_risk = df['risk_score'].mean() if 'risk_score' in df.columns else 0
     high_risk_count = (df['risk_score'] >= 70).sum() if 'risk_score' in df.columns else 0
-    recent_churn_rate = calculate_recent_churn_rate(customer_df, transaction_df, days=7)
+    recent_churn_rate = calculate_recent_churn_rate(transaction_df, days=7)
     
     # 메트릭 표시
     col1, col2, col3 = st.columns(3)
@@ -277,11 +338,12 @@ def show_segment_analysis(df, predictor):
     
     # 세그먼트별 분석
     if segment_type == "구독 유형":
-        segment_col = 'subscription_type'
+        # customer_segment 또는 subscription_type
+        segment_col = 'customer_segment' if 'customer_segment' in df.columns else 'subscription_type'
     elif segment_type == "지역":
         segment_col = 'region'
     else:
-        segment_col = 'customer_type'
+        segment_col = 'customer_type' if 'customer_type' in df.columns else 'customer_segment'
     
     # 세그먼트별 통계
     segment_stats = df.groupby(segment_col).agg({
@@ -320,12 +382,19 @@ def show_segment_analysis(df, predictor):
     # 세그먼트별 상세 통계 테이블
     st.subheader("세그먼트별 상세 통계")
     if 'risk_score' in df.columns:
-        segment_detail = df.groupby(segment_col).agg({
+        # 사용 가능한 컬럼만 집계
+        agg_dict = {
             'risk_score': ['mean', 'std', 'min', 'max'],
-            'predicted_churn': 'sum' if 'predicted_churn' in df.columns else 'count',
-            'total_orders': 'mean',
-            'total_spent': 'mean'
-        }).round(2)
+            'predicted_churn': 'sum' if 'predicted_churn' in df.columns else 'count'
+        }
+        if 'total_purchase_amount' in df.columns:
+            agg_dict['total_purchase_amount'] = 'mean'
+        elif 'total_spent' in df.columns:
+            agg_dict['total_spent'] = 'mean'
+        if 'total_modification_count' in df.columns:
+            agg_dict['total_modification_count'] = 'mean'
+        
+        segment_detail = df.groupby(segment_col).agg(agg_dict).round(2)
         st.dataframe(segment_detail, use_container_width=True)
     
     # 특성 중요도
@@ -417,7 +486,7 @@ def show_ab_test(df, predictor):
             st.plotly_chart(fig_after, use_container_width=True)
 
 
-def show_batch_analysis(df, customer_df, seller_df, transaction_df, predictor):
+def show_batch_analysis(df, customer_df, transaction_df, predictor):
     """배치 분석 페이지"""
     st.header("📦 배치 분석")
     
@@ -480,65 +549,174 @@ def show_batch_analysis(df, customer_df, seller_df, transaction_df, predictor):
     else:
         st.subheader("📋 원본 데이터")
         
-        data_type = st.selectbox("데이터 유형", ["고객 데이터", "판매자 데이터", "거래 데이터"])
+        data_type = st.selectbox("데이터 유형", ["고객 데이터", "거래 데이터"])
         
         if data_type == "고객 데이터":
             st.dataframe(customer_df, use_container_width=True)
-        elif data_type == "판매자 데이터":
-            st.dataframe(seller_df, use_container_width=True)
         else:
             st.dataframe(transaction_df, use_container_width=True)
 
 
-def show_customer_detail(df, predictor):
+def show_customer_detail(df, transaction_df, predictor):
     """개별 고객 조회 페이지"""
     st.header("🔍 개별 고객 조회")
     
     # 고객 선택
     customer_ids = df['customer_id'].tolist()
-    selected_id = st.selectbox("고객 ID 선택", customer_ids)
+    selected_id = st.selectbox("고객 ID 선택", customer_ids, index=0)
     
     if selected_id:
         customer = df[df['customer_id'] == selected_id].iloc[0]
         
-        # 고객 정보 표시
+        # 해당 고객의 거래 이력
+        customer_transactions = transaction_df[transaction_df['customer_id'] == selected_id].copy()
+        
+        # 상단 메트릭
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            total_transactions = len(customer_transactions)
+            st.metric("총 거래 수", f"{total_transactions}건")
+        
+        with col2:
+            total_amount = customer_transactions['sales_amount'].sum() if len(customer_transactions) > 0 else 0
+            st.metric("총 거래금액", f"{total_amount:,.0f}원")
+        
+        with col3:
+            canceled_count = customer_transactions['transaction_canceled'].sum() if len(customer_transactions) > 0 else 0
+            st.metric("취소 거래", f"{canceled_count}건", delta=f"-{canceled_count}건" if canceled_count > 0 else None)
+        
+        with col4:
+            avg_rating = customer_transactions['service_rating'].mean() if len(customer_transactions) > 0 and 'service_rating' in customer_transactions.columns else 0
+            st.metric("평균 평점", f"{avg_rating:.1f}" if avg_rating > 0 else "N/A")
+        
+        st.divider()
+        
+        # 고객 정보 및 리스크 분석
         col1, col2 = st.columns([1, 1])
         
         with col1:
-            st.subheader("고객 정보")
-            info_data = {
-                "고객 ID": customer['customer_id'],
-                "지역": customer['region'],
-                "고객 유형": customer['customer_type'],
-                "구독 유형": customer['subscription_type'],
-                "나이": int(customer['age']),
-                "총 주문 수": int(customer['total_orders']),
-                "총 구매액": f"{customer['total_spent']:,.0f}원",
-                "평균 주문액": f"{customer['avg_order_value']:,.0f}원",
-                "마지막 주문일": f"{int(customer['last_order_days'])}일 전",
-                "고객센터 문의": int(customer['support_tickets']),
-            }
+            st.subheader("📋 고객 기본 정보")
+            info_items = []
             
-            for key, value in info_data.items():
+            # 기본 정보
+            if 'customer_id' in customer:
+                info_items.append(("고객 ID", customer['customer_id']))
+            if 'age' in customer:
+                info_items.append(("나이", f"{int(customer['age'])}세"))
+            if 'region' in customer:
+                info_items.append(("지역", customer['region']))
+            if 'customer_segment' in customer:
+                info_items.append(("고객 세그먼트", customer['customer_segment']))
+            elif 'subscription_type' in customer:
+                info_items.append(("구독 유형", customer['subscription_type']))
+            if 'registration_date' in customer:
+                reg_date = pd.to_datetime(customer['registration_date'])
+                days_since = (datetime.now() - reg_date).days
+                info_items.append(("가입일", f"{reg_date.strftime('%Y-%m-%d')} ({days_since}일 전)"))
+            
+            # 구매 통계
+            if 'total_purchase_amount' in customer:
+                info_items.append(("총 구매금액", f"{customer['total_purchase_amount']:,.0f}원"))
+            elif 'total_spent' in customer:
+                info_items.append(("총 구매금액", f"{customer['total_spent']:,.0f}원"))
+            
+            if 'total_modification_count' in customer:
+                info_items.append(("총 수정요청", f"{int(customer['total_modification_count'])}회"))
+            if 'total_additional_payment' in customer:
+                info_items.append(("총 추가결제", f"{customer['total_additional_payment']:,.0f}원"))
+            
+            for key, value in info_items:
                 st.write(f"**{key}**: {value}")
         
         with col2:
-            st.subheader("리스크 분석")
+            st.subheader("⚠️ 리스크 분석")
             if 'risk_score' in customer:
-                risk_score = customer['risk_score']
+                risk_score = float(customer['risk_score'])
                 fig = create_risk_score_gauge(risk_score)
                 st.plotly_chart(fig, use_container_width=True)
                 
-                st.metric("해지 확률", f"{customer['churn_probability']*100:.2f}%")
-                st.metric("예상 해지 여부", "해지 예상" if customer['predicted_churn'] == 1 else "유지 예상")
-            else:
-                # 실시간 예측
-                result = predictor.predict_single(customer)
-                fig = create_risk_score_gauge(result['risk_score'])
-                st.plotly_chart(fig, use_container_width=True)
+                if 'churn_probability' in customer:
+                    churn_prob = float(customer['churn_probability'])
+                    st.metric("해지 확률", f"{churn_prob*100:.2f}%")
                 
-                st.metric("해지 확률", f"{result['churn_probability']*100:.2f}%")
-                st.metric("예상 해지 여부", "해지 예상" if result['churn'] == 1 else "유지 예상")
+                if 'risk_level' in customer:
+                    risk_level = customer['risk_level']
+                    risk_color = {'높음': '🔴', '중간': '🟡', '낮음': '🟢'}.get(risk_level, '⚪')
+                    st.metric("리스크 레벨", f"{risk_color} {risk_level}")
+                
+                if 'predicted_churn' in customer:
+                    predicted = int(customer['predicted_churn'])
+                    st.metric("예상 해지 여부", "해지 예상" if predicted == 1 else "유지 예상")
+            else:
+                st.info("리스크 스코어 정보가 없습니다.")
+        
+        st.divider()
+        
+        # 거래 이력
+        st.subheader("📊 거래 이력")
+        
+        if len(customer_transactions) > 0:
+            # 거래 이력 요약
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**거래 통계**")
+                st.write(f"- 평균 거래금액: {customer_transactions['sales_amount'].mean():,.0f}원")
+                st.write(f"- 평균 수정요청: {customer_transactions['modification_count'].mean():.1f}회")
+                st.write(f"- 평균 추가결제: {customer_transactions['additional_payment'].mean():,.0f}원")
+            
+            with col2:
+                st.write("**서비스 카테고리**")
+                if 'service_category' in customer_transactions.columns:
+                    category_counts = customer_transactions['service_category'].value_counts()
+                    for cat, count in category_counts.items():
+                        st.write(f"- {cat}: {count}건")
+            
+            # 거래 이력 테이블
+            st.write("**최근 거래 내역**")
+            display_cols = ['transaction_date', 'sales_amount', 'service_category', 
+                          'modification_count', 'service_rating', 'transaction_canceled']
+            available_cols = [col for col in display_cols if col in customer_transactions.columns]
+            
+            # 날짜 순으로 정렬
+            if 'transaction_date' in customer_transactions.columns:
+                customer_transactions_sorted = customer_transactions.sort_values('transaction_date', ascending=False)
+            else:
+                customer_transactions_sorted = customer_transactions
+            
+            st.dataframe(
+                customer_transactions_sorted[available_cols].head(20),
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # 거래 추이 차트
+            if 'transaction_date' in customer_transactions.columns and len(customer_transactions) > 1:
+                st.subheader("거래 추이")
+                fig = go.Figure()
+                
+                # 거래금액 추이
+                customer_transactions_sorted = customer_transactions.sort_values('transaction_date')
+                fig.add_trace(go.Scatter(
+                    x=customer_transactions_sorted['transaction_date'],
+                    y=customer_transactions_sorted['sales_amount'],
+                    mode='lines+markers',
+                    name='거래금액',
+                    line=dict(color='#667eea', width=2),
+                    marker=dict(size=8)
+                ))
+                
+                fig.update_layout(
+                    title="거래금액 추이",
+                    xaxis_title="날짜",
+                    yaxis_title="거래금액 (원)",
+                    height=400,
+                    hovermode='x unified'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("거래 이력이 없습니다.")
 
 
 
