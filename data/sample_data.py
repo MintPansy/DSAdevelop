@@ -174,3 +174,4 @@ if __name__ == "__main__":
     
     print(f"\n해지율: {customer_df['churn'].mean():.2%}")
 
+
