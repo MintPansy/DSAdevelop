@@ -117,10 +117,12 @@ def calculate_recent_churn_rate(customer_df, transaction_df, days=7):
     from datetime import datetime, timedelta
     
     # 최근 N일 이내 거래 고객 필터링
+    # 입력 데이터프레임을 수정하지 않도록 복사본 생성
+    transaction_df_copy = transaction_df.copy()
     cutoff_date = datetime.now() - timedelta(days=days)
-    transaction_df['transaction_date'] = pd.to_datetime(transaction_df['transaction_date'])
-    recent_customers = transaction_df[
-        transaction_df['transaction_date'] >= cutoff_date
+    transaction_df_copy['transaction_date'] = pd.to_datetime(transaction_df_copy['transaction_date'])
+    recent_customers = transaction_df_copy[
+        transaction_df_copy['transaction_date'] >= cutoff_date
     ]['customer_id'].unique()
     
     # 최근 거래 고객 중 해지 고객 비율
