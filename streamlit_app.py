@@ -229,10 +229,28 @@ with tab1:
                 if isinstance(shap_values_sample, list):
                     shap_values_sample = shap_values_sample[1]
                 
-                # 평균 절댓값 SHAP 계산
+                # numpy 배열로 변환
+                shap_values_sample = np.array(shap_values_sample)
+                
+                # 2D 배열인지 확인 (샘플 수 × 피처 개수)
+                if len(shap_values_sample.shape) == 1:
+                    # 1D인 경우 2D로 변환 (1 × 피처 개수)
+                    shap_values_sample = shap_values_sample.reshape(1, -1)
+                
+                # 평균 절댓값 SHAP 계산 (axis=0: 각 피처별로 평균)
                 mean_abs_shap = np.abs(shap_values_sample).mean(axis=0)
+                
+                # 길이 확인 및 조정
+                if len(mean_abs_shap) != len(feature_cols):
+                    st.warning(f"SHAP values 피처 개수 불일치: {len(mean_abs_shap)} vs {len(feature_cols)}")
+                    min_len = min(len(mean_abs_shap), len(feature_cols))
+                    mean_abs_shap = mean_abs_shap[:min_len]
+                    feature_cols_adjusted = feature_cols[:min_len]
+                else:
+                    feature_cols_adjusted = feature_cols
+                
                 feature_importance_global = pd.DataFrame({
-                    'feature': feature_cols,
+                    'feature': feature_cols_adjusted,
                     'importance': mean_abs_shap
                 }).sort_values('importance', ascending=True)
                 
@@ -344,15 +362,28 @@ with tab2:
                     if isinstance(shap_values, list):
                         shap_values = shap_values[1]
                     
+                    # numpy 배열로 변환
+                    shap_values = np.array(shap_values)
+                    
+                    # 2D 배열인 경우 첫 번째 행만 추출 (1D 배열로)
+                    if len(shap_values.shape) > 1:
+                        shap_values = shap_values[0]
+                    
+                    # 1D 배열로 확실히 변환하고 길이 확인
+                    shap_values = shap_values.flatten()
+                    if len(shap_values) != len(feature_cols):
+                        st.error(f"SHAP values 길이 불일치: {len(shap_values)} vs {len(feature_cols)}")
+                        shap_values = shap_values[:len(feature_cols)] if len(shap_values) > len(feature_cols) else np.pad(shap_values, (0, len(feature_cols) - len(shap_values)))
+                    
                     # Expected value 가져오기
                     expected_value = explainer.expected_value
                     if isinstance(expected_value, (list, np.ndarray)):
                         expected_value = expected_value[1] if len(expected_value) > 1 else expected_value[0]
                     
-                    # Feature importance DataFrame 생성
+                    # Feature importance DataFrame 생성 (1D 배열로 확실히 변환)
                     feature_importance = pd.DataFrame({
                         'feature': feature_cols,
-                        'shap_value': shap_values[0] if len(shap_values.shape) > 1 else shap_values
+                        'shap_value': shap_values
                     })
                     feature_importance['abs_shap'] = feature_importance['shap_value'].abs()
                     feature_importance = feature_importance.sort_values('abs_shap', ascending=False)
@@ -445,11 +476,12 @@ with tab2:
                     
                     # Waterfall chart 데이터 준비
                     waterfall_data = []
-                    cumulative = base_value
+                    cumulative = float(base_value) if isinstance(base_value, (int, float)) else 0.0
                     
+                    # feature_importance를 shap_value 순으로 정렬 (절댓값 기준)
                     for _, row in feature_importance.iterrows():
                         feature_name_kr = feature_names_kr.get(row['feature'], row['feature'])
-                        shap_val = row['shap_value']
+                        shap_val = float(row['shap_value'])
                         waterfall_data.append({
                             'feature': feature_name_kr,
                             'shap_value': shap_val,
@@ -458,25 +490,30 @@ with tab2:
                         cumulative += shap_val
                     
                     # Plotly Waterfall chart
+                    base_val = float(base_value) if isinstance(base_value, (int, float)) else 0.0
+                    final_value = float(cumulative)
+                    
                     fig_waterfall = go.Figure(go.Waterfall(
                         orientation="v",
-                        measure=["absolute"] + ["relative"] * (len(waterfall_data) - 1) + ["total"],
-                        x=[feature_names_kr.get(f, f) for f in feature_cols] + ["최종 예측"],
+                        measure=["absolute"] + ["relative"] * len(waterfall_data) + ["total"],
+                        x=["기본값"] + [w['feature'] for w in waterfall_data] + ["최종 예측"],
                         textposition="outside",
-                        text=[f"{base_value:.2%}"] + 
+                        text=[f"{base_val:.2%}"] + 
                              [f"+{w['shap_value']:.2%}" if w['shap_value'] > 0 else f"{w['shap_value']:.2%}" 
                               for w in waterfall_data] + 
-                             [f"{cumulative:.2%}"],
-                        y=[base_value] + [w['shap_value'] for w in waterfall_data] + [cumulative],
+                             [f"{final_value:.2%}"],
+                        y=[base_val] + [w['shap_value'] for w in waterfall_data] + [final_value],
                         connector={"line": {"color": "rgb(63, 63, 63)"}},
                         increasing={"marker": {"color": "#e74c3c"}},
                         decreasing={"marker": {"color": "#2ecc71"}},
                     ))
                     
                     fig_waterfall.update_layout(
-                        title=f"해지 확률 분해 (기본값: {base_value:.2%} → 최종: {cumulative:.2%})",
+                        title=f"해지 확률 분해 (기본값: {base_val:.2%} → 최종: {final_value:.2%})",
                         showlegend=False,
-                        height=500
+                        height=500,
+                        xaxis_title="피처",
+                        yaxis_title="해지 확률"
                     )
                     st.plotly_chart(fig_waterfall, use_container_width=True)
                     
