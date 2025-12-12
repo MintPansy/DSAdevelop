@@ -169,20 +169,32 @@ def calculate_recent_churn_rate(transaction_df, days=7):
     cutoff_date = datetime.now() - timedelta(days=days)
     
     # transaction_date가 이미 datetime이 아닐 수 있으므로 변환
-    if not pd.api.types.is_datetime64_any_dtype(transaction_df_copy['transaction_date']):
-        transaction_df_copy['transaction_date'] = pd.to_datetime(transaction_df_copy['transaction_date'])
-    
-    recent_transactions = transaction_df_copy[
-        transaction_df_copy['transaction_date'] >= cutoff_date
-    ]
+    if 'transaction_date' in transaction_df_copy.columns:
+        if not pd.api.types.is_datetime64_any_dtype(transaction_df_copy['transaction_date']):
+            transaction_df_copy['transaction_date'] = pd.to_datetime(transaction_df_copy['transaction_date'])
+        
+        recent_transactions = transaction_df_copy[
+            transaction_df_copy['transaction_date'] >= cutoff_date
+        ]
+    else:
+        recent_transactions = transaction_df_copy
     
     # 최근 거래 중 취소율 계산
-    if len(recent_transactions) > 0 and 'transaction_canceled' in recent_transactions.columns:
-        return recent_transactions['transaction_canceled'].mean() * 100
+    if len(recent_transactions) > 0:
+        if 'transaction_canceled' in recent_transactions.columns:
+            return recent_transactions['transaction_canceled'].mean() * 100
+        elif 'status' in recent_transactions.columns:
+            # status 컬럼에서 '취소' 또는 '환불' 비율 계산
+            canceled = (recent_transactions['status'].isin(['취소', '환불'])).sum()
+            return (canceled / len(recent_transactions)) * 100
     
     # 대체: 전체 거래 취소율
     if 'transaction_canceled' in transaction_df_copy.columns:
         return transaction_df_copy['transaction_canceled'].mean() * 100
+    elif 'status' in transaction_df_copy.columns:
+        canceled = (transaction_df_copy['status'].isin(['취소', '환불'])).sum()
+        if len(transaction_df_copy) > 0:
+            return (canceled / len(transaction_df_copy)) * 100
     
     return 0.0
 
@@ -579,11 +591,19 @@ def show_customer_detail(df, transaction_df, predictor):
             st.metric("총 거래 수", f"{total_transactions}건")
         
         with col2:
-            total_amount = customer_transactions['sales_amount'].sum() if len(customer_transactions) > 0 else 0
+            # 거래 금액 컬럼명 확인 (amount 또는 sales_amount)
+            amount_col = 'amount' if 'amount' in customer_transactions.columns else 'sales_amount'
+            total_amount = customer_transactions[amount_col].sum() if len(customer_transactions) > 0 and amount_col in customer_transactions.columns else 0
             st.metric("총 거래금액", f"{total_amount:,.0f}원")
         
         with col3:
-            canceled_count = customer_transactions['transaction_canceled'].sum() if len(customer_transactions) > 0 else 0
+            # 취소 거래 수 계산 (transaction_canceled 또는 status 컬럼 사용)
+            if 'transaction_canceled' in customer_transactions.columns:
+                canceled_count = customer_transactions['transaction_canceled'].sum()
+            elif 'status' in customer_transactions.columns:
+                canceled_count = (customer_transactions['status'].isin(['취소', '환불'])).sum()
+            else:
+                canceled_count = 0
             st.metric("취소 거래", f"{canceled_count}건", delta=f"-{canceled_count}건" if canceled_count > 0 else None)
         
         with col4:
@@ -662,21 +682,39 @@ def show_customer_detail(df, transaction_df, predictor):
             
             with col1:
                 st.write("**거래 통계**")
-                st.write(f"- 평균 거래금액: {customer_transactions['sales_amount'].mean():,.0f}원")
-                st.write(f"- 평균 수정요청: {customer_transactions['modification_count'].mean():.1f}회")
-                st.write(f"- 평균 추가결제: {customer_transactions['additional_payment'].mean():,.0f}원")
+                # 거래 금액
+                amount_col = 'amount' if 'amount' in customer_transactions.columns else 'sales_amount'
+                if amount_col in customer_transactions.columns:
+                    st.write(f"- 평균 거래금액: {customer_transactions[amount_col].mean():,.0f}원")
+                # 수정요청 수 (있는 경우만)
+                if 'modification_count' in customer_transactions.columns:
+                    st.write(f"- 평균 수정요청: {customer_transactions['modification_count'].mean():.1f}회")
+                # 추가결제 (있는 경우만)
+                if 'additional_payment' in customer_transactions.columns:
+                    st.write(f"- 평균 추가결제: {customer_transactions['additional_payment'].mean():,.0f}원")
             
             with col2:
                 st.write("**서비스 카테고리**")
-                if 'service_category' in customer_transactions.columns:
-                    category_counts = customer_transactions['service_category'].value_counts()
+                # service_category 또는 project_type 사용
+                category_col = 'service_category' if 'service_category' in customer_transactions.columns else 'project_type'
+                if category_col in customer_transactions.columns:
+                    category_counts = customer_transactions[category_col].value_counts()
                     for cat, count in category_counts.items():
                         st.write(f"- {cat}: {count}건")
             
             # 거래 이력 테이블
             st.write("**최근 거래 내역**")
-            display_cols = ['transaction_date', 'sales_amount', 'service_category', 
-                          'modification_count', 'service_rating', 'transaction_canceled']
+            # 컬럼명 매핑 (sample_data.py와 generate_dummy_data.py 모두 지원)
+            amount_col = 'amount' if 'amount' in customer_transactions.columns else 'sales_amount'
+            category_col = 'service_category' if 'service_category' in customer_transactions.columns else 'project_type'
+            
+            display_cols = ['transaction_date', amount_col, category_col]
+            # 선택적 컬럼 추가 (있는 경우만)
+            optional_cols = ['modification_count', 'service_rating', 'transaction_canceled', 'status', 'payment_status']
+            for col in optional_cols:
+                if col in customer_transactions.columns:
+                    display_cols.append(col)
+            
             available_cols = [col for col in display_cols if col in customer_transactions.columns]
             
             # 날짜 순으로 정렬
@@ -693,19 +731,22 @@ def show_customer_detail(df, transaction_df, predictor):
             
             # 거래 추이 차트
             if 'transaction_date' in customer_transactions.columns and len(customer_transactions) > 1:
-                st.subheader("거래 추이")
-                fig = go.Figure()
-                
-                # 거래금액 추이
-                customer_transactions_sorted = customer_transactions.sort_values('transaction_date')
-                fig.add_trace(go.Scatter(
-                    x=customer_transactions_sorted['transaction_date'],
-                    y=customer_transactions_sorted['sales_amount'],
-                    mode='lines+markers',
-                    name='거래금액',
-                    line=dict(color='#667eea', width=2),
-                    marker=dict(size=8)
-                ))
+                # 거래 금액 컬럼 확인
+                amount_col = 'amount' if 'amount' in customer_transactions.columns else 'sales_amount'
+                if amount_col in customer_transactions.columns:
+                    st.subheader("거래 추이")
+                    fig = go.Figure()
+                    
+                    # 거래금액 추이
+                    customer_transactions_sorted = customer_transactions.sort_values('transaction_date')
+                    fig.add_trace(go.Scatter(
+                        x=customer_transactions_sorted['transaction_date'],
+                        y=customer_transactions_sorted[amount_col],
+                        mode='lines+markers',
+                        name='거래금액',
+                        line=dict(color='#667eea', width=2),
+                        marker=dict(size=8)
+                    ))
                 
                 fig.update_layout(
                     title="거래금액 추이",
