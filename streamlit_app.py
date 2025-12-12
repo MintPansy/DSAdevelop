@@ -385,14 +385,14 @@ with tab2:
                         })
                         feature_importance['abs_shap'] = feature_importance['shap_value'].abs()
                         feature_importance = feature_importance.sort_values('abs_shap', ascending=False)
-                    
-                    # Expected value 가져오기
-                    expected_value = explainer.expected_value
-                    if isinstance(expected_value, (list, np.ndarray)):
-                        expected_value = expected_value[1] if len(expected_value) > 1 else expected_value[0]
-                    
-                    expected_value = float(expected_value) if isinstance(expected_value, (int, float, np.number)) else 0.0
-                    
+                        
+                        # Expected value 가져오기
+                        expected_value = explainer.expected_value
+                        if isinstance(expected_value, (list, np.ndarray)):
+                            expected_value = expected_value[1] if len(expected_value) > 1 else expected_value[0]
+                        
+                        expected_value = float(expected_value) if isinstance(expected_value, (int, float, np.number)) else 0.0
+                        
                         # 1. 텍스트 기반 해석 (메인)
                         st.markdown("#### 1️⃣ 주요 위험 요인 분석")
                         
@@ -475,7 +475,7 @@ with tab2:
                             interpretation += action_suggestion
                         
                         st.info(interpretation)
-                    
+                        
                         # 2. Waterfall Plot (Plotly 기반)
                         st.markdown("#### 2️⃣ 해지 확률 분해 (Waterfall)")
                         
@@ -496,7 +496,7 @@ with tab2:
                                 'cumulative': cumulative
                             })
                             cumulative += shap_val
-                    
+                        
                         # Plotly Waterfall chart
                         final_value = cumulative
                         
