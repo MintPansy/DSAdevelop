@@ -724,3 +724,35 @@ def show_customer_detail(df, transaction_df, predictor):
 if __name__ == "__main__":
     main()
 
+# app.py에 추가하기
+
+import streamlit as st
+import pandas as pd
+from datetime import datetime
+
+# 1. Streamlit 설정 (자동 새로고침)
+st.set_page_config(
+    page_title="고객 해지예측 대시보드",
+    initial_sidebar_state="expanded",
+)
+
+# 2. 자동 새로고침 설정 (매 5분마다 데이터 갱신)
+st.markdown("""
+    <meta http-equiv="refresh" content="300">
+""", unsafe_allow_html=True)
+
+# 3. 데이터 로드 함수 (캐싱 시간 제한)
+@st.cache_data(ttl=300)  # 300초(5분) 후 캐시 무효화
+def load_data():
+    customers = pd.read_csv('data/customers.csv')
+    transactions = pd.read_csv('data/transactions.csv')
+    return customers, transactions
+
+# 4. 마지막 업데이트 시간 표시
+col1, col2 = st.columns([3, 1])
+with col1:
+    st.title("🔴 IT 아웃소싱 고객 해지예측 대시보드")
+with col2:
+    st.metric("마지막 업데이트", datetime.now().strftime("%H:%M:%S"))
+
+customers, transactions = load_data()

@@ -6,7 +6,13 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 import numpy as np
-import shap
+
+# shap은 선택적 import (SHAP 차트가 필요한 경우에만)
+try:
+    import shap
+    HAS_SHAP = True
+except ImportError:
+    HAS_SHAP = False
 
 
 def create_risk_score_gauge(risk_score):
@@ -251,6 +257,10 @@ def create_shap_summary_plot(model, X, feature_names=None, max_display=10):
     Returns:
         matplotlib figure 또는 None
     """
+    if not HAS_SHAP:
+        print("SHAP이 설치되지 않았습니다. SHAP 플롯을 생성할 수 없습니다.")
+        return None
+    
     try:
         # SHAP explainer 생성
         explainer = shap.TreeExplainer(model)
