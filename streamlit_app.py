@@ -111,25 +111,36 @@ def get_shap_explainer(_model, _feature_cols):
         st.warning(f"SHAP Explainer 생성 실패: {e}")
         return None, _feature_cols
 
-# 안전한 SHAP values 추출 함수
-def extract_shap_values(shap_values_raw):
+# 안전한 SHAP values 추출 함수 (핵심!)
+def safe_extract_shap(shap_values_raw, sample_idx=0):
     """
-    SHAP values를 올바른 형태로 추출
+    SHAP values를 안전하게 1D 배열로 변환
     
     입력:
-    - Binary classification이면 리스트 반환: [neg_class, pos_class]
+    - 리스트: [negative_class, positive_class]
       각각 shape: (샘플 수, 피처 수)
-    - Regression이면 numpy array: (샘플 수, 피처 수)
+    - numpy array: (샘플 수, 피처 수) 또는 (피처 수,)
     
     출력:
-    - positive class(해지) SHAP values: numpy array shape (샘플 수, 피처 수)
+    - positive class SHAP values (1D 배열) shape: (피처 수,)
     """
+    # Step 1: 리스트 → positive class 선택
     if isinstance(shap_values_raw, list):
-        # Binary classification: positive class(해지)만 사용
-        return np.array(shap_values_raw[1])
+        shap_vals = shap_values_raw[1]  # positive class (해지)
     else:
-        # Multi-class 또는 regression
-        return np.array(shap_values_raw)
+        shap_vals = shap_values_raw
+    
+    # Step 2: numpy 배열로 변환
+    shap_vals = np.asarray(shap_vals)
+    
+    # Step 3: 첫 번째 샘플 선택 (2D인 경우)
+    if len(shap_vals.shape) > 1:
+        shap_vals = shap_vals[sample_idx]  # shape: (피처 수,)
+    
+    # Step 4: ✅ 무조건 1D로 변환 (핵심!)
+    shap_vals = shap_vals.flatten()  # shape: (피처 수,)
+    
+    return shap_vals
 
 # 예측
 if len(feature_cols) > 0:
@@ -236,27 +247,32 @@ with tab1:
         
         if explainer is not None:
             try:
-                # 데이터 준비 (최대 100개 샘플로 제한 - 성능 최적화)
-                sample_size = min(100, len(customers_df))
-                X_sample = customers_df[feature_cols].head(sample_size).fillna(0)
+                # 데이터 준비 (더 작게 - 성능 최적화)
+                sample_size = min(50, len(customers_df))
+                X_all = customers_df[feature_cols].head(sample_size).fillna(0)
                 
                 # SHAP values 계산
-                shap_values_raw = explainer.shap_values(X_sample.values)
+                shap_values_raw = explainer.shap_values(X_all.values)
                 
-                # 올바른 SHAP values 추출 (positive class만)
-                shap_values_all = extract_shap_values(shap_values_raw)
+                # positive class만 추출
+                if isinstance(shap_values_raw, list):
+                    shap_vals_all = np.array(shap_values_raw[1])  # shape: (50, 5)
+                else:
+                    shap_vals_all = np.array(shap_values_raw)
                 
-                # ✅ 핵심: 평균 절댓값 계산
-                # shape: (100, 5) → mean(axis=0) → shape: (5,) ← 1차원!
-                mean_abs_shap = np.abs(shap_values_all).mean(axis=0)
+                # 평균 계산
+                mean_abs_shap = np.abs(shap_vals_all).mean(axis=0)  # shape: (5,)
                 
-                # 데이터프레임 생성
+                # ✅ 명시적으로 1D 배열로 변환
+                mean_abs_shap = np.asarray(mean_abs_shap).flatten()
+                
+                # DataFrame 생성
                 feature_importance_global = pd.DataFrame({
                     'feature': feature_cols,
-                    'importance': mean_abs_shap  # 길이 일치: feature_cols 개수와 동일
+                    'importance': mean_abs_shap
                 }).sort_values('importance', ascending=True)
                 
-                # Bar chart
+                # 시각화
                 fig = px.barh(
                     feature_importance_global, 
                     x='importance', 
@@ -273,6 +289,8 @@ with tab1:
                 import traceback
                 st.code(traceback.format_exc())
                 st.info("💡 팁: 더미 데이터에서 SHAP 계산이 불안정할 수 있습니다.")
+        else:
+            st.info("SHAP 분석을 사용할 수 없습니다.")
 
 with tab2:
     st.subheader("개별 고객 조회")
@@ -363,15 +381,12 @@ with tab2:
                     # SHAP values 계산
                     shap_values_raw = explainer.shap_values(selected_data.values)
                     
-                    # 올바른 SHAP values 추출 (positive class만)
-                    shap_values_customer = extract_shap_values(shap_values_raw)
+                    # ✅ 안전한 추출 (1D로 변환)
+                    shap_values_1d = safe_extract_shap(shap_values_raw)
                     
-                    # ✅ 첫 번째 샘플 선택
-                    # shape: (1, 5) → [0] → shape: (5,) ← 1차원!
-                    if len(shap_values_customer.shape) > 1:
-                        shap_values_1d = shap_values_customer[0]
-                    else:
-                        shap_values_1d = shap_values_customer
+                    # 디버깅용 (필요시 주석 해제)
+                    # st.write(f"DEBUG: shap_values_1d shape = {shap_values_1d.shape}")
+                    # st.write(f"DEBUG: feature_cols length = {len(feature_cols)}")
                     
                     # 길이 확인
                     if len(shap_values_1d) != len(feature_cols):
@@ -432,30 +447,25 @@ with tab2:
                         third_feature = feature_importance.iloc[2] if len(feature_importance) > 2 else None
                         
                         interpretation = f"""
-### 🎯 이 고객의 위험 요인:
+### 🎯 이 고객의 위험 요인 분석:
 
 **1순위: {top_feature_name.upper()}**
-- 현재값: {top_feature_value:.1f}
 - 영향도: {abs(float(top_feature['shap_value'])):.4f}
 - 방향: {"증가 ↑" if float(top_feature['shap_value']) > 0 else "감소 ↓"}
 """
                         
                         if second_feature is not None:
                             second_feature_name = feature_names_kr.get(second_feature['feature'], second_feature['feature'])
-                            second_feature_value = float(selected_data[second_feature['feature']].values[0])
                             interpretation += f"""
 **2순위: {second_feature_name.upper()}**
-- 현재값: {second_feature_value:.1f}
 - 영향도: {abs(float(second_feature['shap_value'])):.4f}
 - 방향: {"증가 ↑" if float(second_feature['shap_value']) > 0 else "감소 ↓"}
 """
                         
                         if third_feature is not None:
                             third_feature_name = feature_names_kr.get(third_feature['feature'], third_feature['feature'])
-                            third_feature_value = float(selected_data[third_feature['feature']].values[0])
                             interpretation += f"""
 **3순위: {third_feature_name.upper()}**
-- 현재값: {third_feature_value:.1f}
 - 영향도: {abs(float(third_feature['shap_value'])):.4f}
 - 방향: {"증가 ↑" if float(third_feature['shap_value']) > 0 else "감소 ↓"}
 """
@@ -541,10 +551,12 @@ with tab2:
                         st.plotly_chart(fig_importance, use_container_width=True)
                     
             except Exception as e:
-                st.error(f"❌ SHAP 계산 오류: {e}")
+                st.error(f"❌ 개별 고객 분석 실패: {e}")
                 import traceback
-                st.code(traceback.format_exc())
+                st.code(traceback.format_exc())  # 디버깅용
                 st.info("💡 팁: 선택한 고객 데이터를 확인해주세요.")
+        else:
+            st.warning("SHAP 분석을 사용할 수 없습니다.")
 
 with tab3:
     st.subheader("📈 세그먼트 분석")
