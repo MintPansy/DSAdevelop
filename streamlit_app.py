@@ -98,19 +98,38 @@ with st.spinner("모델 학습 중..."):
 
 # SHAP Explainer 생성 (캐싱)
 @st.cache_resource
-def get_shap_explainer(_model, _customers_df, _feature_cols):
-    """SHAP Explainer 생성 및 캐싱"""
+def get_shap_explainer(_model, _feature_cols):
+    """SHAP Explainer 생성 및 캐싱 - 안전성 강화"""
     if not HAS_SHAP:
-        return None, None, None
+        return None, _feature_cols
     
     try:
-        # 학습 데이터 준비
-        X_train = _customers_df[_feature_cols].fillna(0).values
+        # Decision Tree용 TreeExplainer 생성
         explainer = shap.TreeExplainer(_model)
-        return explainer, X_train, _feature_cols
+        return explainer, _feature_cols
     except Exception as e:
         st.warning(f"SHAP Explainer 생성 실패: {e}")
-        return None, None, None
+        return None, _feature_cols
+
+# 안전한 SHAP values 추출 함수
+def extract_shap_values(shap_values_raw):
+    """
+    SHAP values를 올바른 형태로 추출
+    
+    입력:
+    - Binary classification이면 리스트 반환: [neg_class, pos_class]
+      각각 shape: (샘플 수, 피처 수)
+    - Regression이면 numpy array: (샘플 수, 피처 수)
+    
+    출력:
+    - positive class(해지) SHAP values: numpy array shape (샘플 수, 피처 수)
+    """
+    if isinstance(shap_values_raw, list):
+        # Binary classification: positive class(해지)만 사용
+        return np.array(shap_values_raw[1])
+    else:
+        # Multi-class 또는 regression
+        return np.array(shap_values_raw)
 
 # 예측
 if len(feature_cols) > 0:
@@ -213,45 +232,28 @@ with tab1:
     # 글로벌 Feature Importance (SHAP 기반)
     if HAS_SHAP:
         st.subheader("📊 전체 고객 기준 피처 중요도 (SHAP)")
-        explainer, X_train, _ = get_shap_explainer(model, customers_df, feature_cols)
+        explainer, feature_cols_shap = get_shap_explainer(model, feature_cols)
         
         if explainer is not None:
             try:
-                # 샘플링하여 계산 속도 향상 (전체 데이터가 많을 경우)
-                sample_size = min(500, len(customers_df))
-                sample_indices = np.random.choice(len(customers_df), sample_size, replace=False)
-                X_sample = customers_df[feature_cols].iloc[sample_indices].fillna(0).values
+                # 데이터 준비 (최대 100개 샘플로 제한 - 성능 최적화)
+                sample_size = min(100, len(customers_df))
+                X_sample = customers_df[feature_cols].head(sample_size).fillna(0)
                 
                 # SHAP values 계산
-                shap_values_sample = explainer.shap_values(X_sample)
+                shap_values_raw = explainer.shap_values(X_sample.values)
                 
-                # 이진 분류인 경우 클래스 1 (해지)의 SHAP 값 사용
-                if isinstance(shap_values_sample, list):
-                    shap_values_sample = shap_values_sample[1]
+                # 올바른 SHAP values 추출 (positive class만)
+                shap_values_all = extract_shap_values(shap_values_raw)
                 
-                # numpy 배열로 변환
-                shap_values_sample = np.array(shap_values_sample)
+                # ✅ 핵심: 평균 절댓값 계산
+                # shape: (100, 5) → mean(axis=0) → shape: (5,) ← 1차원!
+                mean_abs_shap = np.abs(shap_values_all).mean(axis=0)
                 
-                # 2D 배열인지 확인 (샘플 수 × 피처 개수)
-                if len(shap_values_sample.shape) == 1:
-                    # 1D인 경우 2D로 변환 (1 × 피처 개수)
-                    shap_values_sample = shap_values_sample.reshape(1, -1)
-                
-                # 평균 절댓값 SHAP 계산 (axis=0: 각 피처별로 평균)
-                mean_abs_shap = np.abs(shap_values_sample).mean(axis=0)
-                
-                # 길이 확인 및 조정
-                if len(mean_abs_shap) != len(feature_cols):
-                    st.warning(f"SHAP values 피처 개수 불일치: {len(mean_abs_shap)} vs {len(feature_cols)}")
-                    min_len = min(len(mean_abs_shap), len(feature_cols))
-                    mean_abs_shap = mean_abs_shap[:min_len]
-                    feature_cols_adjusted = feature_cols[:min_len]
-                else:
-                    feature_cols_adjusted = feature_cols
-                
+                # 데이터프레임 생성
                 feature_importance_global = pd.DataFrame({
-                    'feature': feature_cols_adjusted,
-                    'importance': mean_abs_shap
+                    'feature': feature_cols,
+                    'importance': mean_abs_shap  # 길이 일치: feature_cols 개수와 동일
                 }).sort_values('importance', ascending=True)
                 
                 # Bar chart
@@ -267,7 +269,10 @@ with tab1:
                 fig.update_layout(height=400)
                 st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
-                st.warning(f"SHAP 글로벌 분석 실패: {e}")
+                st.error(f"❌ SHAP 글로벌 분석 실패: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+                st.info("💡 팁: 더미 데이터에서 SHAP 계산이 불안정할 수 있습니다.")
 
 with tab2:
     st.subheader("개별 고객 조회")
@@ -343,200 +348,203 @@ with tab2:
         st.divider()
         st.subheader("🔍 모델 해석: 왜 이 고객이 위험한가?")
         
-        explainer, X_train, _ = get_shap_explainer(model, customers_df, feature_cols)
+        explainer, feature_cols_shap = get_shap_explainer(model, feature_cols)
         
         if explainer is not None:
             try:
                 # 선택된 고객 데이터 준비
-                selected_customer_data = customers_df[
+                selected_data = customers_df[
                     customers_df['customer_id'] == customer_id
                 ][feature_cols].fillna(0)
                 
-                if len(selected_customer_data) == 0:
+                if len(selected_data) == 0:
                     st.warning("고객 데이터를 찾을 수 없습니다.")
                 else:
                     # SHAP values 계산
-                    shap_values = explainer.shap_values(selected_customer_data.values)
+                    shap_values_raw = explainer.shap_values(selected_data.values)
                     
-                    # 이진 분류인 경우 클래스 1 (해지)의 SHAP 값 사용
-                    if isinstance(shap_values, list):
-                        shap_values = shap_values[1]
+                    # 올바른 SHAP values 추출 (positive class만)
+                    shap_values_customer = extract_shap_values(shap_values_raw)
                     
-                    # numpy 배열로 변환
-                    shap_values = np.array(shap_values)
+                    # ✅ 첫 번째 샘플 선택
+                    # shape: (1, 5) → [0] → shape: (5,) ← 1차원!
+                    if len(shap_values_customer.shape) > 1:
+                        shap_values_1d = shap_values_customer[0]
+                    else:
+                        shap_values_1d = shap_values_customer
                     
-                    # 2D 배열인 경우 첫 번째 행만 추출 (1D 배열로)
-                    if len(shap_values.shape) > 1:
-                        shap_values = shap_values[0]
-                    
-                    # 1D 배열로 확실히 변환하고 길이 확인
-                    shap_values = shap_values.flatten()
-                    if len(shap_values) != len(feature_cols):
-                        st.error(f"SHAP values 길이 불일치: {len(shap_values)} vs {len(feature_cols)}")
-                        shap_values = shap_values[:len(feature_cols)] if len(shap_values) > len(feature_cols) else np.pad(shap_values, (0, len(feature_cols) - len(shap_values)))
+                    # 길이 확인
+                    if len(shap_values_1d) != len(feature_cols):
+                        st.error(f"❌ SHAP values 길이 불일치: {len(shap_values_1d)} vs {len(feature_cols)}")
+                        st.info("피처 개수와 SHAP values 길이가 일치하지 않습니다.")
+                    else:
+                        # 피처 중요도 DataFrame 생성
+                        feature_importance = pd.DataFrame({
+                            'feature': feature_cols,
+                            'shap_value': shap_values_1d  # 길이: feature_cols 개수와 동일
+                        })
+                        feature_importance['abs_shap'] = feature_importance['shap_value'].abs()
+                        feature_importance = feature_importance.sort_values('abs_shap', ascending=False)
                     
                     # Expected value 가져오기
                     expected_value = explainer.expected_value
                     if isinstance(expected_value, (list, np.ndarray)):
                         expected_value = expected_value[1] if len(expected_value) > 1 else expected_value[0]
                     
-                    # Feature importance DataFrame 생성 (1D 배열로 확실히 변환)
-                    feature_importance = pd.DataFrame({
-                        'feature': feature_cols,
-                        'shap_value': shap_values
-                    })
-                    feature_importance['abs_shap'] = feature_importance['shap_value'].abs()
-                    feature_importance = feature_importance.sort_values('abs_shap', ascending=False)
+                    expected_value = float(expected_value) if isinstance(expected_value, (int, float, np.number)) else 0.0
                     
-                    # 1. 텍스트 기반 해석 (메인)
-                    st.markdown("#### 1️⃣ 주요 위험 요인 분석")
-                    
-                    col1, col2, col3 = st.columns(3)
-                    top_features = feature_importance.head(3)
-                    
-                    feature_names_kr = {
-                        'age': '나이',
-                        'total_spent': '총 구매액',
-                        'total_orders': '총 주문 수',
-                        'avg_order_value': '평균 주문액',
-                        'last_order_days': '최근 주문일',
-                        'support_tickets': '고객센터 문의'
-                    }
-                    
-                    for idx, (_, row) in enumerate(top_features.iterrows()):
-                        with [col1, col2, col3][idx]:
-                            feature_name = row['feature']
-                            feature_name_kr = feature_names_kr.get(feature_name, feature_name)
-                            shap_val = row['shap_value']
-                            direction = "↑ 증가" if shap_val > 0 else "↓ 감소"
-                            
-                            current_value = selected_customer_data[feature_name].values[0]
-                            
-                            st.metric(
-                                f"{idx+1}. {feature_name_kr}",
-                                f"{current_value:.1f}",
-                                delta=f"{abs(shap_val):.3f} ({direction})"
-                            )
-                    
-                    # 해석 텍스트
-                    top_feature = feature_importance.iloc[0]
-                    top_feature_name = feature_names_kr.get(top_feature['feature'], top_feature['feature'])
-                    top_feature_value = selected_customer_data[top_feature['feature']].values[0]
-                    
-                    second_feature = feature_importance.iloc[1] if len(feature_importance) > 1 else None
-                    third_feature = feature_importance.iloc[2] if len(feature_importance) > 2 else None
-                    
-                    interpretation = f"""
-**🎯 이 고객의 해지 위험 원인:**
-
-**상위 위험 요인: {top_feature_name.upper()}**
-- 현재값: {top_feature_value:.1f}
-- 영향도: {top_feature['shap_value']:.3f} ({'해지 위험 증가' if top_feature['shap_value'] > 0 else '해지 위험 감소'})
-"""
-                    
-                    if second_feature is not None:
-                        second_feature_name = feature_names_kr.get(second_feature['feature'], second_feature['feature'])
-                        second_feature_value = selected_customer_data[second_feature['feature']].values[0]
-                        interpretation += f"""
-**보조 요인: {second_feature_name.upper()}**
-- 현재값: {second_feature_value:.1f}
-- 영향도: {second_feature['shap_value']:.3f} ({'해지 위험 증가' if second_feature['shap_value'] > 0 else '해지 위험 감소'})
-"""
-                    
-                    if third_feature is not None:
-                        third_feature_name = feature_names_kr.get(third_feature['feature'], third_feature['feature'])
-                        third_feature_value = selected_customer_data[third_feature['feature']].values[0]
-                        interpretation += f"""
-**추가 요인: {third_feature_name.upper()}**
-- 현재값: {third_feature_value:.1f}
-- 영향도: {third_feature['shap_value']:.3f} ({'해지 위험 증가' if third_feature['shap_value'] > 0 else '해지 위험 감소'})
-"""
-                    
-                    # 권장 액션
-                    if top_feature['shap_value'] > 0:
-                        action_suggestion = "💡 **권장 액션:**\n"
-                        if top_feature['feature'] == 'support_tickets':
-                            action_suggestion += "- 고객센터 문의 문제 해결 우선\n- 고객 만족도 개선 프로그램 제공\n- 할인 쿠폰 또는 특별 프로모션 제공"
-                        elif top_feature['feature'] == 'last_order_days':
-                            action_suggestion += "- 재참여 유도 메일/알림 발송\n- 신규 프로젝트 추천\n- 맞춤형 프로모션 제공"
-                        elif top_feature['feature'] == 'total_spent':
-                            action_suggestion += "- 구매 촉진 프로모션 제공\n- 충성 고객 프로그램 안내\n- 맞춤형 서비스 추천"
-                        else:
-                            action_suggestion += "- 개인 맞춤형 고객 관리 프로그램 참여 권유\n- 고객 만족도 조사 및 피드백 수집"
+                        # 1. 텍스트 기반 해석 (메인)
+                        st.markdown("#### 1️⃣ 주요 위험 요인 분석")
                         
-                        interpretation += f"\n{action_suggestion}"
+                        col1, col2, col3 = st.columns(3)
+                        top_features = feature_importance.head(3)
+                        
+                        feature_names_kr = {
+                            'age': '나이',
+                            'total_spent': '총 구매액',
+                            'total_orders': '총 주문 수',
+                            'avg_order_value': '평균 주문액',
+                            'last_order_days': '최근 주문일',
+                            'support_tickets': '고객센터 문의'
+                        }
+                        
+                        for idx, (_, row) in enumerate(top_features.iterrows()):
+                            with [col1, col2, col3][idx]:
+                                feature_name = row['feature']
+                                feature_name_kr = feature_names_kr.get(feature_name, feature_name)
+                                shap_val = float(row['shap_value'])
+                                direction = "📈 증가" if shap_val > 0 else "📉 감소"
+                                
+                                current_value = float(selected_data[feature_name].values[0])
+                                
+                                st.metric(
+                                    f"{idx+1}. {feature_name_kr}",
+                                    f"{current_value:.1f}",
+                                    delta=f"{abs(shap_val):.4f} ({direction})"
+                                )
+                        
+                        # 상세 분석 텍스트
+                        top_feature = feature_importance.iloc[0]
+                        top_feature_name = feature_names_kr.get(top_feature['feature'], top_feature['feature'])
+                        top_feature_value = float(selected_data[top_feature['feature']].values[0])
+                        
+                        second_feature = feature_importance.iloc[1] if len(feature_importance) > 1 else None
+                        third_feature = feature_importance.iloc[2] if len(feature_importance) > 2 else None
+                        
+                        interpretation = f"""
+### 🎯 이 고객의 위험 요인:
+
+**1순위: {top_feature_name.upper()}**
+- 현재값: {top_feature_value:.1f}
+- 영향도: {abs(float(top_feature['shap_value'])):.4f}
+- 방향: {"증가 ↑" if float(top_feature['shap_value']) > 0 else "감소 ↓"}
+"""
+                        
+                        if second_feature is not None:
+                            second_feature_name = feature_names_kr.get(second_feature['feature'], second_feature['feature'])
+                            second_feature_value = float(selected_data[second_feature['feature']].values[0])
+                            interpretation += f"""
+**2순위: {second_feature_name.upper()}**
+- 현재값: {second_feature_value:.1f}
+- 영향도: {abs(float(second_feature['shap_value'])):.4f}
+- 방향: {"증가 ↑" if float(second_feature['shap_value']) > 0 else "감소 ↓"}
+"""
+                        
+                        if third_feature is not None:
+                            third_feature_name = feature_names_kr.get(third_feature['feature'], third_feature['feature'])
+                            third_feature_value = float(selected_data[third_feature['feature']].values[0])
+                            interpretation += f"""
+**3순위: {third_feature_name.upper()}**
+- 현재값: {third_feature_value:.1f}
+- 영향도: {abs(float(third_feature['shap_value'])):.4f}
+- 방향: {"증가 ↑" if float(third_feature['shap_value']) > 0 else "감소 ↓"}
+"""
+                        
+                        # 권장 액션
+                        if float(top_feature['shap_value']) > 0:
+                            action_suggestion = "\n💡 **권장 액션:**\n"
+                            if top_feature['feature'] == 'support_tickets':
+                                action_suggestion += "- 고객센터 문의 문제 해결 우선\n- 고객 만족도 개선 프로그램 제공\n- 할인 쿠폰 또는 특별 프로모션 제공"
+                            elif top_feature['feature'] == 'last_order_days':
+                                action_suggestion += "- 재참여 유도 메일/알림 발송\n- 신규 프로젝트 추천\n- 맞춤형 프로모션 제공"
+                            elif top_feature['feature'] == 'total_spent':
+                                action_suggestion += "- 구매 촉진 프로모션 제공\n- 충성 고객 프로그램 안내\n- 맞춤형 서비스 추천"
+                            else:
+                                action_suggestion += "- 개인 맞춤형 고객 관리 프로그램 참여 권유\n- 고객 만족도 조사 및 피드백 수집"
+                            
+                            interpretation += action_suggestion
+                        
+                        st.info(interpretation)
                     
-                    st.info(interpretation)
+                        # 2. Waterfall Plot (Plotly 기반)
+                        st.markdown("#### 2️⃣ 해지 확률 분해 (Waterfall)")
+                        
+                        # 기본값에서 시작하여 각 피처의 기여도를 순차적으로 더함
+                        base_val = expected_value
+                        
+                        # Waterfall chart 데이터 준비
+                        waterfall_data = []
+                        cumulative = base_val
+                        
+                        # feature_importance를 shap_value 순으로 정렬 (절댓값 기준)
+                        for _, row in feature_importance.iterrows():
+                            feature_name_kr = feature_names_kr.get(row['feature'], row['feature'])
+                            shap_val = float(row['shap_value'])
+                            waterfall_data.append({
+                                'feature': feature_name_kr,
+                                'shap_value': shap_val,
+                                'cumulative': cumulative
+                            })
+                            cumulative += shap_val
                     
-                    # 2. Waterfall Plot (Plotly 기반)
-                    st.markdown("#### 2️⃣ 해지 확률 분해 (Waterfall)")
-                    
-                    # 기본값에서 시작하여 각 피처의 기여도를 순차적으로 더함
-                    base_value = expected_value if isinstance(expected_value, (int, float)) else 0.0
-                    
-                    # Waterfall chart 데이터 준비
-                    waterfall_data = []
-                    cumulative = float(base_value) if isinstance(base_value, (int, float)) else 0.0
-                    
-                    # feature_importance를 shap_value 순으로 정렬 (절댓값 기준)
-                    for _, row in feature_importance.iterrows():
-                        feature_name_kr = feature_names_kr.get(row['feature'], row['feature'])
-                        shap_val = float(row['shap_value'])
-                        waterfall_data.append({
-                            'feature': feature_name_kr,
-                            'shap_value': shap_val,
-                            'cumulative': cumulative
-                        })
-                        cumulative += shap_val
-                    
-                    # Plotly Waterfall chart
-                    base_val = float(base_value) if isinstance(base_value, (int, float)) else 0.0
-                    final_value = float(cumulative)
-                    
-                    fig_waterfall = go.Figure(go.Waterfall(
-                        orientation="v",
-                        measure=["absolute"] + ["relative"] * len(waterfall_data) + ["total"],
-                        x=["기본값"] + [w['feature'] for w in waterfall_data] + ["최종 예측"],
-                        textposition="outside",
-                        text=[f"{base_val:.2%}"] + 
-                             [f"+{w['shap_value']:.2%}" if w['shap_value'] > 0 else f"{w['shap_value']:.2%}" 
-                              for w in waterfall_data] + 
-                             [f"{final_value:.2%}"],
-                        y=[base_val] + [w['shap_value'] for w in waterfall_data] + [final_value],
-                        connector={"line": {"color": "rgb(63, 63, 63)"}},
-                        increasing={"marker": {"color": "#e74c3c"}},
-                        decreasing={"marker": {"color": "#2ecc71"}},
-                    ))
-                    
-                    fig_waterfall.update_layout(
-                        title=f"해지 확률 분해 (기본값: {base_val:.2%} → 최종: {final_value:.2%})",
-                        showlegend=False,
-                        height=500,
-                        xaxis_title="피처",
-                        yaxis_title="해지 확률"
-                    )
-                    st.plotly_chart(fig_waterfall, use_container_width=True)
-                    
-                    # 3. Feature Importance Bar Chart
-                    st.markdown("#### 3️⃣ 피처 중요도 (SHAP 기반)")
-                    
-                    fig_importance = px.bar(
-                        feature_importance,
-                        x='abs_shap',
-                        y='feature',
-                        orientation='h',
-                        title='피처별 해지 위험 영향도',
-                        labels={'abs_shap': '절댓값 SHAP (영향도)', 'feature': '피처'},
-                        color='abs_shap',
-                        color_continuous_scale='Reds'
-                    )
-                    fig_importance.update_layout(height=400, yaxis={'categoryorder': 'total ascending'})
-                    st.plotly_chart(fig_importance, use_container_width=True)
+                        # Plotly Waterfall chart
+                        final_value = cumulative
+                        
+                        fig_waterfall = go.Figure(go.Waterfall(
+                            orientation="v",
+                            measure=["absolute"] + ["relative"] * len(waterfall_data) + ["total"],
+                            x=["기본값"] + [w['feature'] for w in waterfall_data] + ["최종 예측"],
+                            textposition="outside",
+                            text=[f"{base_val:.2%}"] + 
+                                 [f"+{w['shap_value']:.2%}" if w['shap_value'] > 0 else f"{w['shap_value']:.2%}" 
+                                  for w in waterfall_data] + 
+                                 [f"{final_value:.2%}"],
+                            y=[base_val] + [w['shap_value'] for w in waterfall_data] + [final_value],
+                            connector={"line": {"color": "rgb(63, 63, 63)"}},
+                            increasing={"marker": {"color": "#e74c3c"}},
+                            decreasing={"marker": {"color": "#2ecc71"}},
+                        ))
+                        
+                        fig_waterfall.update_layout(
+                            title=f"해지 확률 분해 (기본값: {base_val:.2%} → 최종: {final_value:.2%})",
+                            showlegend=False,
+                            height=500,
+                            xaxis_title="피처",
+                            yaxis_title="해지 확률"
+                        )
+                        st.plotly_chart(fig_waterfall, use_container_width=True)
+                        
+                        # 3. Feature Importance Bar Chart
+                        st.markdown("#### 3️⃣ 피처 중요도 (SHAP 기반)")
+                        
+                        fig_importance = px.bar(
+                            feature_importance,
+                            x='abs_shap',
+                            y='feature',
+                            orientation='h',
+                            title='피처별 해지 위험 영향도',
+                            labels={'abs_shap': '절댓값 SHAP (영향도)', 'feature': '피처'},
+                            color='abs_shap',
+                            color_continuous_scale='Reds'
+                        )
+                        fig_importance.update_layout(height=400, yaxis={'categoryorder': 'total ascending'})
+                        st.plotly_chart(fig_importance, use_container_width=True)
                     
             except Exception as e:
-                st.error(f"SHAP 계산 오류: {e}")
+                st.error(f"❌ SHAP 계산 오류: {e}")
                 import traceback
                 st.code(traceback.format_exc())
+                st.info("💡 팁: 선택한 고객 데이터를 확인해주세요.")
 
 with tab3:
     st.subheader("📈 세그먼트 분석")
