@@ -284,24 +284,38 @@ with tab1:
                         mean_abs_shap = np.abs(shap_vals_all).mean(axis=0)  # (5,)
                         mean_abs_shap = np.asarray(mean_abs_shap).flatten()
                         
-                        # ✅ Step 7: DataFrame 생성
-                        feature_importance_global = pd.DataFrame({
-                            'feature': feature_cols,
-                            'importance': mean_abs_shap
-                        }).sort_values('importance', ascending=True)
+                        # ✅ Step 7: 최종 길이 검증 및 조정
+                        min_len = min(len(feature_cols), len(mean_abs_shap))
+                        if min_len == 0:
+                            st.error("❌ 배열 길이가 0입니다. 데이터를 확인하세요.")
+                        else:
+                            # 길이가 다르면 조정
+                            if len(feature_cols) != len(mean_abs_shap):
+                                st.warning(f"⚠️ 배열 길이 불일치 감지: feature_cols={len(feature_cols)}, mean_abs_shap={len(mean_abs_shap)}. 최소 길이({min_len})만큼만 사용합니다.")
+                                feature_cols_adjusted = feature_cols[:min_len]
+                                mean_abs_shap_adjusted = mean_abs_shap[:min_len]
+                            else:
+                                feature_cols_adjusted = feature_cols
+                                mean_abs_shap_adjusted = mean_abs_shap
+                            
+                            # ✅ Step 8: DataFrame 생성 (안전하게)
+                            feature_importance_global = pd.DataFrame({
+                                'feature': list(feature_cols_adjusted),
+                                'importance': mean_abs_shap_adjusted
+                            }, dtype=object).sort_values('importance', ascending=True)
                         
-                        # ✅ Step 8: 시각화
-                        fig = px.barh(
-                            feature_importance_global,
-                            x='importance',
-                            y='feature',
-                            title='모델 피처 중요도 (SHAP 기반)',
-                            labels={'importance': '평균 영향도', 'feature': '피처'},
-                            color='importance',
-                            color_continuous_scale='Reds'
-                        )
-                        fig.update_layout(height=400)
-                        st.plotly_chart(fig, use_container_width=True)
+                            # ✅ Step 9: 시각화
+                            fig = px.barh(
+                                feature_importance_global,
+                                x='importance',
+                                y='feature',
+                                title='모델 피처 중요도 (SHAP 기반)',
+                                labels={'importance': '평균 영향도', 'feature': '피처'},
+                                color='importance',
+                                color_continuous_scale='Reds'
+                            )
+                            fig.update_layout(height=400)
+                            st.plotly_chart(fig, use_container_width=True)
                         
             except Exception as e:
                 st.error(f"❌ SHAP 글로벌 분석 실패: {e}")
@@ -413,21 +427,32 @@ with tab2:
                     # ✅ 1D로 변환
                     shap_values_1d = np.asarray(shap_vals).flatten()  # (5,)
                     
-                    # ✅ 길이 검증
-                    if len(shap_values_1d) != len(feature_cols):
-                        st.error(f"""
-                        ❌ 배열 길이 불일치!
-                        - feature_cols: {len(feature_cols)}개
-                        - shap_values: {len(shap_values_1d)}개
-                        """)
-                        st.write(f"**디버깅 정보**: shap_values_1d.shape={shap_values_1d.shape}, feature_cols={feature_cols}")
+                    # ✅ 길이 검증 및 조정
+                    min_len = min(len(feature_cols), len(shap_values_1d))
+                    if min_len == 0:
+                        st.error("❌ 배열 길이가 0입니다. 데이터를 확인하세요.")
                     else:
-                        # DataFrame 생성
+                        # 길이가 다르면 조정
+                        if len(shap_values_1d) != len(feature_cols):
+                            st.warning(f"""
+                            ⚠️ 배열 길이 불일치 감지!
+                            - feature_cols: {len(feature_cols)}개
+                            - shap_values: {len(shap_values_1d)}개
+                            - 최소 길이({min_len})만큼만 사용합니다.
+                            """)
+                            st.write(f"**디버깅 정보**: shap_values_1d.shape={shap_values_1d.shape}, feature_cols={feature_cols}")
+                            feature_cols_adjusted = feature_cols[:min_len]
+                            shap_values_1d_adjusted = shap_values_1d[:min_len]
+                        else:
+                            feature_cols_adjusted = feature_cols
+                            shap_values_1d_adjusted = shap_values_1d
+                        
+                        # DataFrame 생성 (안전하게)
                         feature_importance = pd.DataFrame({
-                            'feature': feature_cols,
-                            'shap_value': shap_values_1d,
-                            'abs_shap': np.abs(shap_values_1d)
-                        }).sort_values('abs_shap', ascending=False)
+                            'feature': list(feature_cols_adjusted),
+                            'shap_value': shap_values_1d_adjusted,
+                            'abs_shap': np.abs(shap_values_1d_adjusted)
+                        }, dtype=object).sort_values('abs_shap', ascending=False)
                         
                         # Expected value 가져오기
                         expected_value = explainer.expected_value
